@@ -12,8 +12,33 @@ struct SeffRequest {
     payload: *mut u8,
 }
 type SeffStartFn = unsafe extern "C" fn(*const u8) -> *const u8;
+
+#[repr(C)]
+enum SeffCoroutineState { FINISHED, PAUSED, RUNNING }
+
+#[repr(C)]
+struct SeffCont {
+    current_coroutine: *const u8,
+    rsp: *const u8,
+    rbp: *const u8,
+    ip: *const u8,
+    rbx: *const u8,
+    r12: *const u8,
+    r13: *const u8,
+    r14: *const u8,
+    r15: *const u8,
+}
+
+#[repr(C)]
+struct SeffCoroutine {
+    frame_ptr: *const u8,
+    resume_point: SeffCont,
+    state: SeffCoroutineState,
+    parent: *const SeffCoroutine,
+    handled_effects: u64,
+}
+
 extern "C" {
-    type SeffCoroutine;
     fn seff_coroutine_new(f: *const SeffStartFn, arg: *const u8) -> *mut SeffCoroutine;
     fn seff_coroutine_delete(coro: *mut SeffCoroutine);
 
@@ -72,12 +97,12 @@ where
     }
 }
 
-unsafe extern "C" fn run<Ret, Cmd, F>(f: *mut u8) -> *mut u8
+unsafe extern "C" fn run<Ret, Cmd>(f: *mut u8) -> *mut u8
 where
     Cmd: Command,
-    F: FnOnce(&Capability<Cmd>) -> Ret,
 {
-    let closure = mem::transmute::<*mut u8, Box<F>>(f);
+    let closure_ptr = &*(f as *mut Box<dyn FnOnce(&Capability<Cmd>)->Ret>);
+    let closure = mem::transmute_copy::<Box<dyn FnOnce(&Capability<Cmd>)->Ret>, Box<dyn FnOnce(&Capability<Cmd>)->Ret>>(closure_ptr);
     let current = seff_current_coroutine();
     let cap = Capability {
         seff_coro: current,
@@ -94,12 +119,12 @@ where
     where
         F: FnOnce(&Capability<Cmd>) -> Ret + 'a,
     {
-        let boxed_clos: Box<F> = Box::new(f);
-        let clos_ptr = &boxed_clos as *const Box<F> as *const u8 as *mut u8;
+        let boxed_clos: Box<dyn FnOnce(&Capability<Cmd>) -> Ret> = Box::new(f);
+        let clos_ptr = &boxed_clos as *const Box<dyn FnOnce(&Capability<Cmd>)->Ret> as *const u8 as *mut u8;
         mem::forget(boxed_clos);
         Coroutine {
             seff_coro: unsafe {
-                seff_coroutine_new(run::<Ret, Cmd, F> as *mut SeffStartFn, clos_ptr)
+                seff_coroutine_new(run::<Ret, Cmd> as *mut SeffStartFn, clos_ptr)
             },
             marker: std::marker::PhantomData,
         }
