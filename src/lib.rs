@@ -71,7 +71,17 @@ where
     Perform(Cmd, Resumption<'a, Ret, Cmd>),
 }
 
+type StartFn<'a, Ret, Cmd> = dyn FnOnce(&Capability<Cmd>) -> Ret + 'a;
+
 pub struct Coroutine<'a, Ret, Cmd>
+where
+    Cmd: Command,
+{
+    closure: Box<StartFn<'a, Ret, Cmd>>,
+}
+
+#[derive(Debug)]
+pub struct Resumption<'a, Ret, Cmd>
 where
     Cmd: Command,
 {
@@ -79,7 +89,7 @@ where
     marker: PhantomData<&'a (Cmd, Ret)>,
 }
 
-impl<'a, Ret, Cmd> Drop for Coroutine<'a, Ret, Cmd>
+impl<'a, Ret, Cmd> Drop for Resumption<'a, Ret, Cmd>
 where
     Cmd: Command,
 {
@@ -88,35 +98,19 @@ where
     }
 }
 
-impl<'a, Ret, Cmd> std::fmt::Debug for Coroutine<'a, Ret, Cmd>
-where
-    Cmd: Command,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        "Coroutine(??)".fmt(f)
-    }
-}
 
-#[derive(Debug)]
-pub struct Resumption<'a, Ret, Cmd>
+unsafe extern "C" fn run<'a, Ret, Cmd>(f: *mut u8) -> *mut u8
 where
     Cmd: Command,
 {
-    coroutine: Coroutine<'a, Ret, Cmd>
-}
-
-unsafe extern "C" fn run<Ret, Cmd>(f: *mut u8) -> *mut u8
-where
-    Cmd: Command,
-{
-    let closure_ptr = f as *mut Box<dyn FnOnce(&Capability<Cmd>)->Ret>;
-    let closure = Box::from_raw(closure_ptr);
+    let clos_box_ptr = f as *const *mut u8 as *const *mut StartFn<'a, Ret, Cmd>;
+    let clos_box = Box::from_raw(*clos_box_ptr);
     let current = seff_current_coroutine();
     let cap = Capability {
         seff_coro: current,
         marker: std::marker::PhantomData,
     };
-    Box::<Ret>::into_raw(Box::new((closure)(&cap))) as *mut u8
+    Box::<Ret>::into_raw(Box::new((clos_box)(&cap))) as *mut u8
 }
 
 impl<'a, Ret: 'a, Cmd> Coroutine<'a, Ret, Cmd>
@@ -127,38 +121,25 @@ where
     where
         F: FnOnce(&Capability<Cmd>) -> Ret + 'a,
     {
-        let boxed_clos: Box<Box<dyn FnOnce(&Capability<Cmd>) -> Ret>> = Box::new(Box::new(f));
-        let raw = Box::into_raw(boxed_clos);
-        let clos_ptr = raw as *const Box<dyn FnOnce(&Capability<Cmd>)->Ret> as *const u8 as *mut u8;
         Coroutine {
-            seff_coro: unsafe {
-                seff_coroutine_new(run::<Ret, Cmd> as *mut SeffStartFn, clos_ptr)
-            },
-            marker: std::marker::PhantomData,
-        }
-    }
-
-    fn interpret_request(self, request: SeffRequest) -> Request<'a, Ret, Cmd> {
-        if request.effect == !0 {
-            let result = unsafe { Box::<Ret>::from_raw(request.payload as *mut Ret) };
-            Request::Return(*result)
-        } else {
-            let request =
-                unsafe { mem::transmute_copy::<Cmd, Cmd>(&*(request.payload as *const Cmd)) };
-            Request::Perform(request, Resumption{ coroutine: self })
+            closure: Box::new(f),
         }
     }
 
     pub fn start(self) -> Request<'a, Ret, Cmd> {
-        let k = self.seff_coro;
-        self.interpret_request(unsafe { seff_resume(k, std::ptr::null_mut(), 0) })
-    }
-
-    fn resume(self, result: Cmd::Result) -> Request<'a, Ret, Cmd> {
-        let result_ptr = &result as *const Cmd::Result as *const u8;
-        mem::forget(result);
-        let k = self.seff_coro;
-        self.interpret_request(unsafe { seff_resume(k, result_ptr, 0) })
+        let clos_box = Box::into_raw(self.closure);
+        let clos_box_ptr = &clos_box as *const *mut StartFn<'a, Ret, Cmd>;
+        let coro = unsafe {
+            seff_coroutine_new(
+                run::<Ret, Cmd> as *const SeffStartFn,
+                clos_box_ptr as *const *const u8 as *const u8
+            )
+        };
+        let res = Resumption {
+            seff_coro: coro,
+            marker: std::marker::PhantomData,
+        };
+        res.interpret_request(unsafe { seff_resume(coro, std::ptr::null_mut(), 0) })
     }
 }
 
@@ -166,8 +147,22 @@ impl<'a, Ret: 'a, Cmd> Resumption<'a, Ret, Cmd>
 where
     Cmd: Command,
 {
+    fn interpret_request(self, request: SeffRequest) -> Request<'a, Ret, Cmd> {
+        if request.effect == !0 {
+            let result = unsafe { Box::<Ret>::from_raw(request.payload as *mut Ret) };
+            Request::Return(*result)
+        } else {
+            let request =
+                unsafe { mem::transmute_copy::<Cmd, Cmd>(&*(request.payload as *const Cmd)) };
+            Request::Perform(request, self)
+        }
+    }
+
     pub fn resume(self, result: Cmd::Result) -> Request<'a, Ret, Cmd> {
-        self.coroutine.resume(result)
+        let result_ptr = &result as *const Cmd::Result as *const u8;
+        mem::forget(result);
+        let k = self.seff_coro;
+        self.interpret_request(unsafe { seff_resume(k, result_ptr, 0) })
     }
 }
 
