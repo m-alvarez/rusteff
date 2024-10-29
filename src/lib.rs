@@ -14,7 +14,11 @@ struct SeffRequest {
 type SeffStartFn = unsafe extern "C" fn(*const u8) -> *const u8;
 
 #[repr(C)]
-enum SeffCoroutineState { FINISHED, PAUSED, RUNNING }
+enum SeffCoroutineState {
+    FINISHED,
+    PAUSED,
+    RUNNING,
+}
 
 #[repr(C)]
 struct SeffCont {
@@ -50,6 +54,7 @@ extern "C" {
         eff: SeffEffectID,
         payload: *const u8,
     ) -> *const u8;
+    fn seff_exit(yield_from: *mut SeffCoroutine, eff: SeffEffectID, payload: *const u8) -> !;
 }
 
 pub trait Command
@@ -98,7 +103,6 @@ where
     }
 }
 
-
 unsafe extern "C" fn run<'a, Ret, Cmd>(f: *mut u8) -> *mut u8
 where
     Cmd: Command,
@@ -110,7 +114,8 @@ where
         seff_coro: current,
         marker: std::marker::PhantomData,
     };
-    Box::<Ret>::into_raw(Box::new((clos_box)(&cap))) as *mut u8
+    let result = clos_box(&cap);
+    unsafe { seff_exit(current, !0, &result as *const Ret as *const u8) }
 }
 
 impl<'a, Ret: 'a, Cmd> Coroutine<'a, Ret, Cmd>
@@ -132,7 +137,7 @@ where
         let coro = unsafe {
             seff_coroutine_new(
                 run::<Ret, Cmd> as *const SeffStartFn,
-                clos_box_ptr as *const *const u8 as *const u8
+                clos_box_ptr as *const *const u8 as *const u8,
             )
         };
         let res = Resumption {
@@ -149,8 +154,9 @@ where
 {
     fn interpret_request(self, request: SeffRequest) -> Request<'a, Ret, Cmd> {
         if request.effect == !0 {
-            let result = unsafe { Box::<Ret>::from_raw(request.payload as *mut Ret) };
-            Request::Return(*result)
+            let result =
+                unsafe { mem::transmute_copy::<Ret, Ret>(&*(request.payload as *const Ret)) };
+            Request::Return(result)
         } else {
             let request =
                 unsafe { mem::transmute_copy::<Cmd, Cmd>(&*(request.payload as *const Cmd)) };
