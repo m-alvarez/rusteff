@@ -68,7 +68,7 @@ where
     Cmd: Command,
 {
     Return(Ret),
-    Perform(Cmd, Coroutine<'a, Ret, Cmd>),
+    Perform(Cmd, Resumption<'a, Ret, Cmd>),
 }
 
 pub struct Coroutine<'a, Ret, Cmd>
@@ -97,12 +97,20 @@ where
     }
 }
 
+#[derive(Debug)]
+pub struct Resumption<'a, Ret, Cmd>
+where
+    Cmd: Command,
+{
+    coroutine: Coroutine<'a, Ret, Cmd>
+}
+
 unsafe extern "C" fn run<Ret, Cmd>(f: *mut u8) -> *mut u8
 where
     Cmd: Command,
 {
-    let closure_ptr = &*(f as *mut Box<dyn FnOnce(&Capability<Cmd>)->Ret>);
-    let closure = mem::transmute_copy::<Box<dyn FnOnce(&Capability<Cmd>)->Ret>, Box<dyn FnOnce(&Capability<Cmd>)->Ret>>(closure_ptr);
+    let closure_ptr = f as *mut Box<dyn FnOnce(&Capability<Cmd>)->Ret>;
+    let closure = Box::from_raw(closure_ptr);
     let current = seff_current_coroutine();
     let cap = Capability {
         seff_coro: current,
@@ -119,9 +127,9 @@ where
     where
         F: FnOnce(&Capability<Cmd>) -> Ret + 'a,
     {
-        let boxed_clos: Box<dyn FnOnce(&Capability<Cmd>) -> Ret> = Box::new(f);
-        let clos_ptr = &boxed_clos as *const Box<dyn FnOnce(&Capability<Cmd>)->Ret> as *const u8 as *mut u8;
-        mem::forget(boxed_clos);
+        let boxed_clos: Box<Box<dyn FnOnce(&Capability<Cmd>) -> Ret>> = Box::new(Box::new(f));
+        let raw = Box::into_raw(boxed_clos);
+        let clos_ptr = raw as *const Box<dyn FnOnce(&Capability<Cmd>)->Ret> as *const u8 as *mut u8;
         Coroutine {
             seff_coro: unsafe {
                 seff_coroutine_new(run::<Ret, Cmd> as *mut SeffStartFn, clos_ptr)
@@ -137,7 +145,7 @@ where
         } else {
             let request =
                 unsafe { mem::transmute_copy::<Cmd, Cmd>(&*(request.payload as *const Cmd)) };
-            Request::Perform(request, self)
+            Request::Perform(request, Resumption{ coroutine: self })
         }
     }
 
@@ -146,11 +154,20 @@ where
         self.interpret_request(unsafe { seff_resume(k, std::ptr::null_mut(), 0) })
     }
 
-    pub fn resume(self, result: Cmd::Result) -> Request<'a, Ret, Cmd> {
+    fn resume(self, result: Cmd::Result) -> Request<'a, Ret, Cmd> {
         let result_ptr = &result as *const Cmd::Result as *const u8;
         mem::forget(result);
         let k = self.seff_coro;
         self.interpret_request(unsafe { seff_resume(k, result_ptr, 0) })
+    }
+}
+
+impl<'a, Ret: 'a, Cmd> Resumption<'a, Ret, Cmd>
+where
+    Cmd: Command,
+{
+    pub fn resume(self, result: Cmd::Result) -> Request<'a, Ret, Cmd> {
+        self.coroutine.resume(result)
     }
 }
 
