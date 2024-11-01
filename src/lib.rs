@@ -70,6 +70,50 @@ impl Command for ! {
     type Result = !;
 }
 
+trait Closed {}
+
+trait CloseT<T>
+where
+    T: Closed,
+{
+    type Result: Closed;
+}
+type Close<K, T> = <K as CloseT<T>>::Result;
+
+pub struct Done;
+impl Closed for Done {}
+
+pub struct Choose<L, R>(PhantomData<(L, R)>);
+impl<L: Closed, R: Closed> Closed for Choose<L, R> {}
+impl<T: Closed, L: CloseT<T>, R: CloseT<T>> CloseT<T> for Choose<L, R> {
+    type Result = Choose<Close<L, T>, Close<R, T>>;
+}
+
+pub struct Perform<Cmd: Command, Rest>(PhantomData<(Cmd, Rest)>);
+impl<Cmd: Command, Rest: Closed> Closed for Perform<Cmd, Rest> {}
+impl<T: Closed, Cmd: Command, Rest: CloseT<T>> CloseT<T> for Perform<Cmd, Rest> {
+    type Result = Perform<Cmd, Close<Rest, T>>;
+}
+
+pub struct Recur;
+impl<T: Closed> CloseT<T> for Recur {
+    type Result = T;
+}
+
+pub struct Fix<F>(PhantomData<F>);
+impl<F> Closed for Fix<F> {}
+
+struct Get {}
+impl Command for Get {
+    type Result = i64;
+}
+struct Put(i64);
+impl Command for Put {
+    type Result = ();
+}
+// Example:
+type Example = Fix<Choose<Choose<Perform<Get, Recur>, Perform<Put, Recur>>, Done>>;
+
 #[derive(Debug)]
 pub enum Request<'a, Ret, Cmd>
 where
@@ -88,8 +132,8 @@ where
     closure: Box<StartFn<'a, Ret, Cmd>>,
 }
 
-unsafe impl <'a, Ret, Cmd> Send for Coroutine<'a, Ret, Cmd> where Cmd: Command {}
-unsafe impl <'a, Ret, Cmd> Send for Resumption<'a, Ret, Cmd> where Cmd: Command {}
+unsafe impl<'a, Ret, Cmd> Send for Coroutine<'a, Ret, Cmd> where Cmd: Command {}
+unsafe impl<'a, Ret, Cmd> Send for Resumption<'a, Ret, Cmd> where Cmd: Command {}
 
 #[derive(Debug)]
 pub struct Resumption<'a, Ret, Cmd>
