@@ -1,4 +1,3 @@
-#![feature(extern_types)]
 #![feature(never_type)]
 
 use std::marker::PhantomData;
@@ -13,13 +12,16 @@ struct SeffRequest {
 }
 type SeffStartFn = unsafe extern "C" fn(*const u8) -> *const u8;
 
+// Provided for debugging purposes
 #[repr(C)]
+#[allow(dead_code)]
 enum SeffCoroutineState {
-    FINISHED,
-    PAUSED,
-    RUNNING,
+    Finished,
+    Paused,
+    Running,
 }
 
+// Provided for debugging purposes
 #[repr(C)]
 struct SeffCont {
     current_coroutine: *const u8,
@@ -33,6 +35,7 @@ struct SeffCont {
     r15: *const u8,
 }
 
+// Provided for debugging purposes
 #[repr(C)]
 struct SeffCoroutine {
     frame_ptr: *const u8,
@@ -84,6 +87,9 @@ where
 {
     closure: Box<StartFn<'a, Ret, Cmd>>,
 }
+
+unsafe impl <'a, Ret, Cmd> Send for Coroutine<'a, Ret, Cmd> where Cmd: Command {}
+unsafe impl <'a, Ret, Cmd> Send for Resumption<'a, Ret, Cmd> where Cmd: Command {}
 
 #[derive(Debug)]
 pub struct Resumption<'a, Ret, Cmd>
