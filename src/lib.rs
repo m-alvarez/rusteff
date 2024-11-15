@@ -1,4 +1,5 @@
 #![feature(never_type)]
+#![feature(inherent_associated_types)]
 
 use std::marker::PhantomData;
 use std::mem;
@@ -70,97 +71,95 @@ impl Command for ! {
     type Result = !;
 }
 
-trait Closed {}
+trait IProtocol {}
+trait IOpen {}
+pub trait Protocol: IProtocol {}
+pub trait Open: IOpen {}
 
-trait CloseT<T>
+trait IRecurT<T>
 where
-    T: Closed,
+    T: Protocol,
 {
-    type Result: Closed;
+    type Result: Protocol;
 }
-type Close<K, T> = <K as CloseT<T>>::Result;
+trait RecurT<T>: IRecurT<T> {}
+pub type Recurse<K, T> = <K as RecurT<T>>::Result;
 
-pub struct Done;
-impl Closed for Done {}
-
-pub struct Choose<L, R>(PhantomData<(L, R)>);
-impl<L: Closed, R: Closed> Closed for Choose<L, R> {}
-impl<T: Closed, L: CloseT<T>, R: CloseT<T>> CloseT<T> for Choose<L, R> {
-    type Result = Choose<Close<L, T>, Close<R, T>>;
+pub struct Choice<L, R>(PhantomData<(L, R)>);
+impl<L: Open, R:Open> Open for Choice<L, R> {}
+impl<L: Protocol, R: Protocol> Protocol for Choice<L, R> {}
+impl<T: Protocol, L: RecurT<T>, R: RecurT<T>> RecurT<T> for Choice<L, R> {
+    type Result = Choice<Recurse<L, T>, Recurse<R, T>>;
 }
 
 pub struct Perform<Cmd: Command, Rest>(PhantomData<(Cmd, Rest)>);
-impl<Cmd: Command, Rest: Closed> Closed for Perform<Cmd, Rest> {}
-impl<T: Closed, Cmd: Command, Rest: CloseT<T>> CloseT<T> for Perform<Cmd, Rest> {
-    type Result = Perform<Cmd, Close<Rest, T>>;
+impl<Cmd: Command, Rest: Open> Open for Perform<Cmd, Rest> {}
+impl<Cmd: Command, Rest: Protocol> Protocol for Perform<Cmd, Rest> {}
+impl<T: Protocol, Cmd: Command, Rest: RecurT<T>> RecurT<T> for Perform<Cmd, Rest> {
+    type Result = Perform<Cmd, Recurse<Rest, T>>;
 }
 
 pub struct Recur;
-impl<T: Closed> CloseT<T> for Recur {
+impl Open for Recur {}
+impl<T: Protocol> RecurT<T> for Recur {
     type Result = T;
 }
 
-pub struct Fix<F>(PhantomData<F>);
-impl<F> Closed for Fix<F> {}
+pub struct Fix<F: Open>(PhantomData<F>);
+impl<F> Protocol for Fix<F> where F: Open {}
 
-struct Get {}
-impl Command for Get {
-    type Result = i64;
-}
-struct Put(i64);
-impl Command for Put {
-    type Result = ();
-}
-// Example:
-type Example = Fix<Choose<Choose<Perform<Get, Recur>, Perform<Put, Recur>>, Done>>;
+pub struct Done;
+impl Open for Done {}
+impl Protocol for Done {}
 
 #[derive(Debug)]
-pub enum Request<'a, Ret, Cmd>
+pub enum Request<'a, Ret, Cmd, Proto: Protocol>
 where
     Cmd: Command,
 {
     Return(Ret),
-    Perform(Cmd, Resumption<'a, Ret, Cmd>),
+    Perform(Cmd, Resumption<'a, Cmd::Result, Ret, Proto>),
 }
 
-type StartFn<'a, Ret, Cmd> = dyn FnOnce(&Capability<Cmd>) -> Ret + 'a;
+type StartFn<'a, Ret, Proto> = dyn FnOnce(&Capability<Proto>) -> Ret + 'a;
 
-pub struct Coroutine<'a, Ret, Cmd>
-where
-    Cmd: Command,
+pub struct Coroutine<'a, Ret, Proto: Protocol>
 {
-    closure: Box<StartFn<'a, Ret, Cmd>>,
+    closure: Box<StartFn<'a, Ret, Proto>>,
 }
 
-unsafe impl<'a, Ret, Cmd> Send for Coroutine<'a, Ret, Cmd> where Cmd: Command {}
-unsafe impl<'a, Ret, Cmd> Send for Resumption<'a, Ret, Cmd> where Cmd: Command {}
+unsafe impl<'a, Ret, Proto: Protocol> Send for Coroutine<'a, Ret, Proto> {}
+unsafe impl<'a, Res, Ret, Proto: Protocol> Send for Resumption<'a, Res, Ret, Proto> {}
 
 #[derive(Debug)]
-pub struct Resumption<'a, Ret, Cmd>
-where
-    Cmd: Command,
+pub struct Resumption<'a, Res, Ret, Proto: Protocol>
 {
     seff_coro: *mut SeffCoroutine,
-    marker: PhantomData<&'a (Cmd, Ret)>,
+    marker: PhantomData<&'a (Res, Ret, Proto)>,
 }
 
-impl<'a, Ret, Cmd> Drop for Resumption<'a, Ret, Cmd>
-where
-    Cmd: Command,
+impl<'a, Res, Ret, Proto: Protocol> Drop for Resumption<'a, Res, Ret, Proto>
 {
     fn drop(&mut self) {
         unsafe { seff_coroutine_delete(self.seff_coro) }
     }
 }
 
-unsafe extern "C" fn run<'a, Ret, Cmd>(f: *mut u8) -> *mut u8
-where
-    Cmd: Command,
+impl<'a, Res, Ret, Proto: Protocol> Resumption<'a, Res, Ret, Proto> {
+    unsafe fn reinterpret<Proto1: Protocol>(self) -> Resumption<'a, Res, Ret, Proto1> {
+        Resumption { seff_coro: self.seff_coro, marker: std::marker::PhantomData }
+    }
+}
+
+impl<'a, Res, Ret, Proto: Protocol> Resumption<'a, Res, Ret, Proto> {
+}
+
+unsafe extern "C" fn run<'a, Ret, Proto: Protocol>(f: *mut u8) -> *mut u8
 {
-    let clos_box_ptr = f as *const *mut u8 as *const *mut StartFn<'a, Ret, Cmd>;
+    let clos_box_ptr = f as *const *mut u8 as *const *mut StartFn<'a, Ret, Proto>;
     let clos_box = Box::from_raw(*clos_box_ptr);
     let current = seff_current_coroutine();
-    let cap = Capability {
+    let cap = Capability::<Proto> {
         seff_coro: current,
         marker: std::marker::PhantomData,
     };
@@ -168,19 +167,53 @@ where
     unsafe { seff_exit(current, !0, &result as *const Ret as *const u8) }
 }
 
-impl<'a, Ret: 'a, Cmd> Coroutine<'a, Ret, Cmd>
-where
-    Cmd: Command,
+pub struct Capability<Proto: Protocol>
 {
-    pub fn new<F>(f: F) -> Coroutine<'a, Ret, Cmd>
+    seff_coro: *mut SeffCoroutine,
+    marker: std::marker::PhantomData<Proto>,
+}
+
+impl <Proto: Protocol> Capability<Proto> {
+    unsafe fn reinterpret<Proto1: Protocol>(self) -> Capability<Proto1> {
+        Capability { seff_coro: self.seff_coro, marker: std::marker::PhantomData }
+    }
+}
+
+impl <Proto: Protocol, Cmd: Command> Capability<Perform<Cmd, Proto>> {
+    pub fn perform(self, cmd: Cmd) -> (Capability<Proto>, Cmd::Result) {
+        (unsafe { self.reinterpret::<Proto>() }, todo!())
+    }
+}
+
+impl <L: Protocol, R: Protocol> Capability<Choice<L, R>> {
+    pub fn left(self) -> Capability<L> {
+        unsafe { self.reinterpret::<L>() }
+    }
+    pub fn right(self) -> Capability<R> {
+        unsafe { self.reinterpret::<R>() }
+    }
+}
+
+impl <F: Open> Capability<Fix<F>>
+    where F: RecurT<Fix<F>>
+{
+    pub fn go(self) -> Capability<Recurse<F, Fix<F>>> {
+        unsafe { self.reinterpret::<Recurse<F, Fix<F>>>() }
+    }
+}
+
+impl<'a, Ret: 'a, Proto: Protocol> Coroutine<'a, Ret, Proto>
+{
+    pub fn new<F>(f: F) -> Coroutine<'a, Ret, Proto>
     where
-        F: FnOnce(&Capability<Cmd>) -> Ret + 'a,
+        F: FnOnce(&Capability<Proto>) -> Ret + 'a,
     {
         Coroutine {
             closure: Box::new(f),
         }
     }
 
+    /*
     pub fn start(self) -> Request<'a, Ret, Cmd> {
         let clos_box = Box::into_raw(self.closure);
         let clos_box_ptr = &clos_box as *const *mut StartFn<'a, Ret, Cmd>;
@@ -196,13 +229,13 @@ where
         };
         res.interpret_request(unsafe { seff_resume(coro, std::ptr::null_mut(), 0) })
     }
+    */
 }
 
-impl<'a, Ret: 'a, Cmd> Resumption<'a, Ret, Cmd>
-where
-    Cmd: Command,
+/*
+impl<'a, Res, Ret: 'a, Proto> Resumption<'a, Res, Ret, Proto>
 {
-    fn interpret_request(self, request: SeffRequest) -> Request<'a, Ret, Cmd> {
+    fn interpret_request(self, request: SeffRequest) -> Request<'a, Ret, Proto> {
         if request.effect == !0 {
             let result =
                 unsafe { mem::transmute_copy::<Ret, Ret>(&*(request.payload as *const Ret)) };
@@ -222,17 +255,7 @@ where
     }
 }
 
-pub struct Capability<Cmd>
-where
-    Cmd: Command,
-{
-    seff_coro: *mut SeffCoroutine,
-    marker: std::marker::PhantomData<Cmd>,
-}
-
-impl<Cmd> Capability<Cmd>
-where
-    Cmd: Command,
+impl<Proto> Capability<Proto>
 {
     pub fn perform(&self, cmd: Cmd) -> Cmd::Result {
         let cmd_ptr = &cmd as *const Cmd as *const u8;
@@ -241,3 +264,4 @@ where
         unsafe { mem::transmute_copy::<Cmd::Result, Cmd::Result>(&*(result_ptr)) }
     }
 }
+*/
