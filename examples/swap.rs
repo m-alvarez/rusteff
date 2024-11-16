@@ -21,7 +21,7 @@ fn main() {
         });
         let mut flip = false;
         let mut result = Some(handler_b.start());
-        while let Some(Request::Perform(_, handle)) = result.take() {
+        while let Some(Request::Perform((_, handle))) = result.take() {
             flip = !flip;
             if flip {
                 result = Some(handle.resume(cap_a.perform(A{}) * 10))
@@ -32,7 +32,7 @@ fn main() {
     });
 
     let mut result = Some(handler_a.start());
-    while let Some(Request::Perform(_, handle)) = result.take() {
+    while let Some(Request::Perform((_, handle))) = result.take() {
         result = Some(handle.resume(123))
     }
 }

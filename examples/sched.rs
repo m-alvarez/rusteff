@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 
 enum Task<'a> {
     Start(Coroutine<'a, (), SchedulerRequest>),
-    Resume(Resumption<'a, (), SchedulerRequest>),
+    Resume(Resumption<'a, (), (), SchedulerRequest>),
 }
 struct Scheduler<'a> {
     tasks: VecDeque<Task<'a>>
@@ -46,10 +46,10 @@ impl <'a> Scheduler<'a> {
         match request {
             None => false,
             Some(Request::Return(())) => true,
-            Some(Request::Perform(SchedulerRequest::Pause, res)) => {
+            Some(Request::Perform((SchedulerRequest::Pause, res))) => {
                 self.tasks.push_back(Task::Resume(res)); true
             },
-            Some(Request::Perform(SchedulerRequest::Fork(f), res)) => {
+            Some(Request::Perform((SchedulerRequest::Fork(f), res))) => {
                 self.tasks.push_back(Task::Resume(res));
                 self.tasks.push_back(Task::Start(Coroutine::new(f)));
                 true

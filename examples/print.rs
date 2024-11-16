@@ -17,7 +17,7 @@ fn main() {
         99
     });
     let mut result = Some(coro.start());
-    while let Some(Request::Perform(eff, coro)) = result.take() {
+    while let Some(Request::Perform((eff, coro))) = result.take() {
         println!("Handler prints {}", eff.num);
         result = Some(coro.resume(()))
     }
