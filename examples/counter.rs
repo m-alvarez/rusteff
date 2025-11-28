@@ -1,4 +1,4 @@
-use rusteff::{Capability, Command, Coroutine, Request, Either, L, R};
+use rusteff::{Command, Coroutine, Request, Either, L, R};
 
 struct Get<T>(std::marker::PhantomData<T>);
 impl<T: 'static> Command for Get<T> {
